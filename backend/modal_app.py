@@ -22,6 +22,8 @@ SUSPICIOUS_KEYWORDS = (
     "login-verify",
     "webmail-login",
     "okta-login",
+    "sso-login",
+    "mfa-reset",
 )
 
 
@@ -31,6 +33,8 @@ SUSPICIOUS_KEYWORDS = (
         modal.Secret.from_name("supabase-secret"),
         modal.Secret.from_name("gemini-secret"),
         modal.Secret.from_name("openai-secret"),
+        # Optional: create with `modal secret create groq-secret GROQ_API_KEY=gsk_...`
+        # modal.Secret.from_name("groq-secret"),
     ],
 )
 @modal.asgi_app()
@@ -39,14 +43,17 @@ def fastapi_app():
     supabase_key = os.environ.get("SUPABASE_KEY")
     supabase: Client = create_client(supabase_url, supabase_key)
 
-    gemini_client = openai.OpenAI(
-        api_key=os.environ.get("GEMINI_API_KEY"),
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    groq_key = os.environ.get("GROQ_API_KEY")
+    openai_key = os.environ.get("OPENAI_API_KEY")
+
+    groq_client = (
+        openai.OpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
+        if groq_key
+        else None
     )
-    openai_client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    openai_client = openai.OpenAI(api_key=openai_key) if openai_key else None
 
     inner_web_app = FastAPI()
-
     inner_web_app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -57,7 +64,7 @@ def fastapi_app():
 
     class PageData(BaseModel):
         url: str
-        html: str
+        html: str = ""
 
     def heuristic_result(url: str, html: str):
         url_lower = (url or "").lower()
@@ -75,7 +82,17 @@ def fastapi_app():
         )
         trusted = any(
             t in url_lower
-            for t in ("sap.com", "ibm.com", "localhost", "127.0.0.1", "example.com")
+            for t in (
+                "sap.com",
+                "ibm.com",
+                "localhost",
+                "127.0.0.1",
+                "example.com",
+                "google.com",
+                "microsoft.com",
+                "apple.com",
+                "github.com",
+            )
         )
         if has_password and not trusted:
             reasons.append(
@@ -97,34 +114,33 @@ def fastapi_app():
             "threat_type": "None",
         }
 
-    def ask_model(client, model: str, prompt: str):
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        return json.loads(completion.choices[0].message.content)
+    def ask_fast_ai(prompt: str):
+        # Groq first (free + very fast), then OpenAI. Skip Gemini — quota exhausted.
+        providers = []
+        if groq_client:
+            providers.append(("groq", groq_client, "llama-3.1-8b-instant"))
+        if openai_client:
+            providers.append(("openai", openai_client, "gpt-4o-mini"))
 
-    def ask_ai(prompt: str):
-        # Prefer OpenAI first — Gemini free tier is currently exhausted (limit: 0)
-        providers = [
-            ("openai", openai_client, "gpt-4o-mini"),
-            ("gemini", gemini_client, "gemini-2.0-flash"),
-        ]
         last_error = None
         for name, client, model in providers:
-            if name == "openai" and not os.environ.get("OPENAI_API_KEY"):
-                continue
-            if name == "gemini" and not os.environ.get("GEMINI_API_KEY"):
-                continue
             try:
-                result = ask_model(client, model, prompt)
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                    temperature=0,
+                    max_tokens=300,
+                )
+                result = json.loads(completion.choices[0].message.content)
                 print(f"AI Analysis via {name}/{model}:", result)
                 return result
             except Exception as e:
                 last_error = e
                 print(f"AI Error ({name}/{model}):", e)
-        raise last_error or RuntimeError("No AI provider available")
+        if last_error:
+            raise last_error
+        raise RuntimeError("No AI provider configured")
 
     def threat_response(data: PageData, result: dict):
         threat_info = {
@@ -148,41 +164,30 @@ def fastapi_app():
 
     @inner_web_app.post("/analyze")
     def analyze_page(data: PageData):
-        # 1) Instant heuristic path for reliable hackathon demos
+        # Always compute heuristics first — instant, no quota issues
         fallback = heuristic_result(data.url, data.html)
         if fallback.get("is_phishing"):
-            print("Heuristic phishing hit (skipping AI):", fallback)
+            print("Heuristic phishing hit:", fallback)
             return threat_response(data, fallback)
 
+        # Optional AI only for clean/borderline pages (skip if no keys / failures)
         prompt = f"""
-        You are an elite cybersecurity expert analyzing a webpage for phishing and credential harvesting.
+        You are a cybersecurity expert. Analyze this page for phishing.
         URL: {data.url}
-        HTML Snippet: {data.html[:2500]}
-
-        Analyze the URL and the HTML for deceptive patterns, fake SSO logins, or urgency tactics.
-        CRITICAL RULE: If the URL contains suspicious phishing or brand-spoofing keywords (such as 'sap-login', 'verify-account', 'slack-update', 'ibm-auth', 'phish'), treat it as a malicious phishing attempt and set 'is_phishing' to true, even if the underlying HTML is generic or blank placeholder text.
-
-        Respond strictly in valid JSON format with the following keys:
-        - is_phishing (boolean: true if malicious, false if safe)
-        - confidence (float between 0.0 and 1.0)
-        - reason (short 1-sentence string explaining your finding)
-        - threat_type (short string, e.g., 'Brand Spoofing', 'Credential Harvester', or 'None')
+        HTML Snippet: {(data.html or '')[:1500]}
+        Return JSON with keys: is_phishing (bool), confidence (0-1), reason (string), threat_type (string).
         """
-
-        # 2) AI path for borderline pages (OpenAI first, Gemini second)
         try:
-            result = ask_ai(prompt)
+            result = ask_fast_ai(prompt)
+            if result.get("is_phishing"):
+                return threat_response(data, result)
+            return {
+                "is_phishing": False,
+                "confidence": result.get("confidence", 0.01),
+                "reason": result.get("reason", "Page appears clean."),
+            }
         except Exception as e:
-            print("All AI providers unavailable, using heuristic fallback:", e)
-            result = fallback
-
-        if result.get("is_phishing"):
-            return threat_response(data, result)
-
-        return {
-            "is_phishing": False,
-            "confidence": result.get("confidence", 0.01),
-            "reason": result.get("reason", "Page appears clean."),
-        }
+            print("AI unavailable, returning heuristic result:", e)
+            return fallback
 
     return inner_web_app
