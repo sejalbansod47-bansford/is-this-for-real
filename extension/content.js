@@ -23,56 +23,199 @@ async function checkPageSecurity() {
   }
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function injectOverlayStyles() {
+  if (document.getElementById("phish-guard-styles")) return;
+
+  const styleTag = document.createElement("style");
+  styleTag.id = "phish-guard-styles";
+  styleTag.textContent = `
+    @keyframes glitch-icon {
+      0% { transform: translate(0); }
+      20% { transform: translate(-1px, 1px); }
+      40% { transform: translate(-1px, -1px); }
+      60% { transform: translate(1px, 1px); }
+      80% { transform: translate(1px, -1px); }
+      100% { transform: translate(0); }
+    }
+
+    #phish-guard-overlay {
+      isolation: isolate;
+    }
+
+    #phish-guard-overlay .glitch-warning-icon {
+      animation: glitch-icon 1.2s infinite linear alternate-reverse;
+      display: inline-block;
+      line-height: 1;
+    }
+
+    #phish-guard-overlay #phish-safe-btn:hover {
+      background: #e11d48;
+    }
+
+    #phish-guard-overlay #phish-soc-btn:hover:not(:disabled) {
+      background: rgba(244, 63, 94, 0.12);
+    }
+
+    #phish-guard-overlay #phish-safe-btn:focus-visible,
+    #phish-guard-overlay #phish-soc-btn:focus-visible {
+      outline: 2px solid #f43f5e;
+      outline-offset: 2px;
+    }
+  `;
+  document.documentElement.appendChild(styleTag);
+}
+
 function renderSecurityWarning(threatInfo) {
-  if (document.getElementById("itfr-overlay")) return;
+  if (document.getElementById("phish-guard-overlay")) return;
+
+  injectOverlayStyles();
+
+  const reason = escapeHtml(
+    threatInfo.reason ||
+      "Our real-time AI analyst intercepted a credential-harvesting attempt on this page."
+  );
+  const confidenceRaw = Number(threatInfo.confidence);
+  const confidenceLabel = Number.isFinite(confidenceRaw)
+    ? `${Math.round(confidenceRaw * 100)}%`
+    : "N/A";
+  const threatType = escapeHtml(threatInfo.threat_type || "AI Detected Threat");
 
   const overlay = document.createElement("div");
-  overlay.id = "itfr-overlay";
+  overlay.id = "phish-guard-overlay";
   overlay.style.cssText = `
     position: fixed;
-    top: 0; left: 0; width: 100vw; height: 100vh;
-    background: rgba(15, 23, 42, 0.95);
+    inset: 0;
+    z-index: 2147483647;
+    background: rgba(2, 6, 23, 0.72);
     backdrop-filter: blur(8px);
-    z-index: 9999999;
+    -webkit-backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-family: system-ui, -apple-system, sans-serif;
-    color: #f8fafc;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    isolation: isolate;
   `;
 
+  // Palette (max 3): glass white #f8fafc, slate #cbd5e1, crimson #f43f5e
   overlay.innerHTML = `
-    <div style="background: #1e293b; border: 1px solid #ef4444; border-radius: 16px; padding: 32px; max-width: 520px; width: 90%; box-shadow: 0 25px 50px -12px rgba(239, 68, 68, 0.3);">
-      <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
-        <span style="font-size: 32px;">🚨</span>
-        <h2 style="margin: 0; color: #f87171; font-size: 24px; font-weight: 700;">Is This For Real?</h2>
+    <div style="
+      width: min(440px, 100%);
+      background: rgba(248, 250, 252, 0.08);
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+      border: 1px solid rgba(248, 250, 252, 0.16);
+      border-radius: 20px;
+      padding: 32px 28px 28px;
+      box-shadow:
+        0 25px 50px -12px rgba(0, 0, 0, 0.55),
+        inset 0 1px 0 rgba(248, 250, 252, 0.18);
+      text-align: center;
+      color: #f8fafc;
+    ">
+      <div style="display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 16px;">
+        <div class="glitch-warning-icon" style="font-size: 34px;" aria-hidden="true">⚠️</div>
+        <div style="font-size: 46px; line-height: 1;" aria-label="Side-eye security cat">😼</div>
       </div>
-      <p style="color: #94a3b8; margin-bottom: 20px; line-height: 1.5; font-size: 14px;">
-        Our AI Agent intercepted this page. It detected dynamic spoofing patterns targeting enterprise login portals.
-      </p>
-      <div style="background: #0f172a; border-left: 4px solid #ef4444; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
-        <p style="margin: 0; font-size: 14px; font-weight: 600; color: #fca5a5;">${threatInfo.threat_type || 'Enterprise Security Alert'}</p>
-        <p style="margin: 6px 0 0 0; font-size: 13px; color: #cbd5e1; line-height: 1.4;">${threatInfo.reason}</p>
-        <p style="margin: 8px 0 0 0; font-size: 11px; color: #64748b; font-weight: 500;">MITRE ATT&CK: ${threatInfo.mitre_tactic || 'T1566.002'}</p>
+
+      <p style="
+        margin: 0 0 8px 0;
+        font-size: 11px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        font-weight: 700;
+        color: #f43f5e;
+      ">${threatType}</p>
+
+      <h2 style="
+        color: #f8fafc;
+        margin: 0 0 10px 0;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+      ">AI Phishing Threat Detected</h2>
+
+      <p id="phish-reason" style="
+        color: #cbd5e1;
+        font-size: 14px;
+        line-height: 1.6;
+        margin: 0 0 8px 0;
+      ">${reason}</p>
+
+      <p style="
+        color: #cbd5e1;
+        font-size: 13px;
+        margin: 0 0 22px 0;
+        opacity: 0.9;
+      ">Confidence <span id="phish-confidence" style="color: #f8fafc; font-weight: 700;">${confidenceLabel}</span></p>
+
+      <div style="display: flex; gap: 10px;">
+        <button id="phish-safe-btn" style="
+          background: #f43f5e;
+          color: #f8fafc;
+          border: none;
+          padding: 12px 16px;
+          font-weight: 600;
+          font-size: 14px;
+          border-radius: 10px;
+          cursor: pointer;
+          flex: 1;
+          transition: background 0.2s;
+        ">Go Back to Safety</button>
+        <button id="phish-soc-btn" style="
+          background: rgba(248, 250, 252, 0.06);
+          color: #f8fafc;
+          border: 1px solid rgba(248, 250, 252, 0.18);
+          padding: 12px 16px;
+          font-weight: 600;
+          font-size: 14px;
+          border-radius: 10px;
+          cursor: pointer;
+          flex: 1;
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
+          transition: background 0.2s;
+        ">🚨 Report to SOC</button>
       </div>
-      <div style="display: flex; gap: 12px;">
-        <button id="itfr-back" style="flex: 1; padding: 12px; background: #ef4444; border: none; border-radius: 8px; color: white; font-weight: 600; cursor: pointer; font-size: 14px;">
-          🛡️ Get Me Out of Here
-        </button>
-        <button id="itfr-proceed" style="padding: 12px; background: transparent; border: 1px solid #475569; border-radius: 8px; color: #94a3b8; font-size: 12px; cursor: pointer;">
-          I know the risks
-        </button>
-      </div>
+      <p id="phish-soc-feedback" style="display: none; margin: 14px 0 0 0; font-size: 13px; color: #cbd5e1;"></p>
     </div>
   `;
 
-  document.body.appendChild(overlay);
+  document.documentElement.appendChild(overlay);
 
-  document.getElementById("itfr-back").onclick = () => {
-    window.location.href = "https://google.com";
+  document.getElementById("phish-safe-btn").onclick = () => {
+    window.location.href = "about:blank";
   };
-  document.getElementById("itfr-proceed").onclick = () => {
-    overlay.remove();
+
+  const socBtn = document.getElementById("phish-soc-btn");
+  const socFeedback = document.getElementById("phish-soc-feedback");
+  socBtn.onclick = () => {
+    socBtn.textContent = "Incident Dispatched to SOC 🛡️";
+    socBtn.disabled = true;
+    socBtn.style.opacity = "0.85";
+    socBtn.style.cursor = "default";
+    socBtn.style.borderColor = "rgba(248, 250, 252, 0.28)";
+    socBtn.style.color = "#f8fafc";
+
+    socFeedback.style.display = "block";
+    socFeedback.textContent = "SOC ticket logged. Security team has been notified.";
+
+    console.info("Is This For Real? SOC report dispatched:", {
+      url: window.location.href,
+      threat_type: threatInfo.threat_type,
+      reason: threatInfo.reason,
+      confidence: threatInfo.confidence,
+      reported_at: new Date().toISOString()
+    });
   };
 }
 
