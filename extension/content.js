@@ -26,18 +26,24 @@ function localHeuristicResult(url, html) {
   }
 
   const hasPassword =
-    htmlLower.includes('type="password"') || htmlLower.includes("type='password'");
+    htmlLower.includes('type="password"') ||
+    htmlLower.includes("type='password'") ||
+    htmlLower.includes("type=password");
+
+  // Only treat major production brands as trusted (not localhost — needed for demos)
   const trusted = [
-    "sap.com",
-    "ibm.com",
-    "localhost",
-    "127.0.0.1",
-    "example.com",
-    "google.com",
-    "microsoft.com",
-    "apple.com",
-    "github.com"
-  ].some((t) => urlLower.includes(t));
+    "https://sap.com",
+    "https://www.sap.com",
+    "https://ibm.com",
+    "https://www.ibm.com",
+    "https://google.com",
+    "https://www.google.com",
+    "https://microsoft.com",
+    "https://www.microsoft.com",
+    "https://apple.com",
+    "https://www.apple.com",
+    "https://github.com"
+  ].some((t) => urlLower.startsWith(t));
 
   if (hasPassword && !trusted) {
     reasons.push("Password form detected on an unverified third-party domain.");
@@ -49,7 +55,7 @@ function localHeuristicResult(url, html) {
       confidence: 0.94,
       reason: reasons.join(" "),
       threat_type: "Brand Spoofing",
-      mitre_tactic: "T1566 - Phishing via AI Detection"
+      mitre_tactic: "T1566 - Phishing via Heuristic Detection"
     };
   }
 

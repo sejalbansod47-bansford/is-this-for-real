@@ -1,15 +1,13 @@
 import os
-import json
 import modal
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
-import openai
 
 app = modal.App("is-this-for-real")
 
-image = modal.Image.debian_slim().pip_install("fastapi", "pydantic", "supabase", "openai")
+image = modal.Image.debian_slim().pip_install("fastapi", "pydantic", "supabase")
 
 SUSPICIOUS_KEYWORDS = (
     "sap-login",
@@ -29,29 +27,13 @@ SUSPICIOUS_KEYWORDS = (
 
 @app.function(
     image=image,
-    secrets=[
-        modal.Secret.from_name("supabase-secret"),
-        modal.Secret.from_name("gemini-secret"),
-        modal.Secret.from_name("openai-secret"),
-        # Optional: create with `modal secret create groq-secret GROQ_API_KEY=gsk_...`
-        # modal.Secret.from_name("groq-secret"),
-    ],
+    secrets=[modal.Secret.from_name("supabase-secret")],
 )
 @modal.asgi_app()
 def fastapi_app():
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_KEY")
     supabase: Client = create_client(supabase_url, supabase_key)
-
-    groq_key = os.environ.get("GROQ_API_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY")
-
-    groq_client = (
-        openai.OpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
-        if groq_key
-        else None
-    )
-    openai_client = openai.OpenAI(api_key=openai_key) if openai_key else None
 
     inner_web_app = FastAPI()
     inner_web_app.add_middleware(
@@ -78,20 +60,25 @@ def fastapi_app():
             )
 
         has_password = (
-            'type="password"' in html_lower or "type='password'" in html_lower
+            'type="password"' in html_lower
+            or "type='password'" in html_lower
+            or "type=password" in html_lower
         )
+        # Do NOT treat localhost as trusted — needed for local hackathon demos
         trusted = any(
             t in url_lower
             for t in (
-                "sap.com",
-                "ibm.com",
-                "localhost",
-                "127.0.0.1",
-                "example.com",
-                "google.com",
-                "microsoft.com",
-                "apple.com",
-                "github.com",
+                "https://sap.com",
+                "https://www.sap.com",
+                "https://ibm.com",
+                "https://www.ibm.com",
+                "https://google.com",
+                "https://www.google.com",
+                "https://microsoft.com",
+                "https://www.microsoft.com",
+                "https://apple.com",
+                "https://www.apple.com",
+                "https://github.com",
             )
         )
         if has_password and not trusted:
@@ -114,38 +101,10 @@ def fastapi_app():
             "threat_type": "None",
         }
 
-    def ask_fast_ai(prompt: str):
-        # Groq first (free + very fast), then OpenAI. Skip Gemini — quota exhausted.
-        providers = []
-        if groq_client:
-            providers.append(("groq", groq_client, "llama-3.1-8b-instant"))
-        if openai_client:
-            providers.append(("openai", openai_client, "gpt-4o-mini"))
-
-        last_error = None
-        for name, client, model in providers:
-            try:
-                completion = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                    max_tokens=300,
-                )
-                result = json.loads(completion.choices[0].message.content)
-                print(f"AI Analysis via {name}/{model}:", result)
-                return result
-            except Exception as e:
-                last_error = e
-                print(f"AI Error ({name}/{model}):", e)
-        if last_error:
-            raise last_error
-        raise RuntimeError("No AI provider configured")
-
     def threat_response(data: PageData, result: dict):
         threat_info = {
             "url": data.url,
-            "threat_type": result.get("threat_type", "AI Detected Threat"),
+            "threat_type": result.get("threat_type", "Heuristic Detected Threat"),
             "reason": result.get("reason", "Flagged by security analysis."),
             "confidence": result.get("confidence", 0.95),
         }
@@ -159,35 +118,24 @@ def fastapi_app():
             "confidence": threat_info["confidence"],
             "reason": threat_info["reason"],
             "threat_type": threat_info["threat_type"],
-            "mitre_tactic": "T1566 - Phishing via AI Detection",
+            "mitre_tactic": "T1566 - Phishing via Heuristic Detection",
         }
+
+    @inner_web_app.get("/health")
+    def health():
+        return {"status": "ok", "mode": "heuristic-only"}
 
     @inner_web_app.post("/analyze")
     def analyze_page(data: PageData):
-        # Always compute heuristics first — instant, no quota issues
-        fallback = heuristic_result(data.url, data.html)
-        if fallback.get("is_phishing"):
-            print("Heuristic phishing hit:", fallback)
-            return threat_response(data, fallback)
-
-        # Optional AI only for clean/borderline pages (skip if no keys / failures)
-        prompt = f"""
-        You are a cybersecurity expert. Analyze this page for phishing.
-        URL: {data.url}
-        HTML Snippet: {(data.html or '')[:1500]}
-        Return JSON with keys: is_phishing (bool), confidence (0-1), reason (string), threat_type (string).
-        """
-        try:
-            result = ask_fast_ai(prompt)
-            if result.get("is_phishing"):
-                return threat_response(data, result)
-            return {
-                "is_phishing": False,
-                "confidence": result.get("confidence", 0.01),
-                "reason": result.get("reason", "Page appears clean."),
-            }
-        except Exception as e:
-            print("AI unavailable, returning heuristic result:", e)
-            return fallback
+        # Pure heuristics — Gemini/OpenAI quotas are exhausted for this hackathon
+        result = heuristic_result(data.url, data.html)
+        print("Heuristic result:", result)
+        if result.get("is_phishing"):
+            return threat_response(data, result)
+        return {
+            "is_phishing": False,
+            "confidence": result.get("confidence", 0.01),
+            "reason": result.get("reason", "Page appears clean."),
+        }
 
     return inner_web_app
