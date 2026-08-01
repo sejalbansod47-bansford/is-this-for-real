@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Is This For Real?",
+  "version": "1.0.0",
+  "description": "Real-time AI-powered active phishing and enterprise credential harvest interceptor.",
+  "permissions": ["activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "action": {
+    "default_title": "Is This For Real?"
+  }
+}
